@@ -3,8 +3,9 @@
 // Keeps from the vendor design only:
 //   - gpif2_slave_fifo32: the FPGA side of the stock FX3 firmware's slave FIFO
 //   - gen_clks: MMCM, 40 MHz in -> 100 MHz bus_clk and gpif_clk
-// Everything else is u220_core. The AD9361 is held in reset, the TX amplifiers
-// are off, and every other output sits at a fixed idle level.
+// Everything else is u220_core. At power-up the AD9361 is held in reset
+// (CAT_CTRL), the TX amplifiers are off (FE_CTRL), and every other output sits
+// at a fixed idle level. The AD9361 SPI is driven by u220_spi.
 
 `default_nettype none
 module u220_top (
@@ -127,6 +128,7 @@ module u220_top (
         .tx_tdata(tx_tdata), .tx_tlast(tx_tlast), .tx_tvalid(tx_tvalid), .tx_tready(tx_tready),
         .rx_tdata(rx_tdata), .rx_tlast(rx_tlast), .rx_tvalid(rx_tvalid), .rx_tready(rx_tready),
         .cat_ctrl(cat_ctrl), .cat_ctrl_out(CAT_CTL_OUT), .fe_ctrl(fe_ctrl), .vctcxo_dac(vctcxo_dac),
+        .spi_sclk(CAT_SPI_CLK), .spi_sen_n(CAT_SPI_EN), .spi_mosi(CAT_SPI_DI), .spi_miso(CAT_SPI_DO),
         .led_heartbeat(led_heartbeat), .led_activity(led_activity));
 
     // ------------------------------------------------------------------- FX3
@@ -154,9 +156,6 @@ module u220_top (
     assign CAT_CTL_IN  = cat_ctrl[7:4];
     assign CAT_SYNC    = cat_ctrl[8];
 
-    assign CAT_SPI_EN  = 1'b1;          // deselected until the SPI master exists
-    assign CAT_SPI_CLK = 1'b0;
-    assign CAT_SPI_DI  = 1'b0;
 
     assign CAT_FBCLK_P = 1'b0;
     assign CAT_FBCLK_N = 1'b0;

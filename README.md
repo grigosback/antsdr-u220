@@ -57,7 +57,7 @@ loaded, because the bootloader always shows 480M.
 
 | Target | Top | What it is |
 |---|---|---|
-| `u220` | `fpga/u220/u220_top.v` | **Own minimal design**: register file, USB loopback, packet generator. AD9361 held in reset, TX amps off |
+| `u220` | `fpga/u220/u220_top.v` | **Own design**: register file, USB loopback, packet generator, AD9361 SPI master. AD9361 held in reset at power-up, TX amps off |
 | `b210compat` | `fpga/b210compat/antsdr_u220.v` | MicroPhase's B210-compatible design, retargeted to the 200T. Known-good reference |
 
 Both share `fpga/lib` (Ettus/MicroPhase library subset) and `fpga/ip`.
@@ -99,7 +99,26 @@ register's previous value.
 | 0x0021 | ro | CAT_CTRL_OUT | AD9361 CTRL_OUT |
 | 0x0022 | rw | FE_CTRL | TX amps, RF switches (default 0: amps off) |
 | 0x0023 | rw | VCTCXO_DAC | 40 MHz trim DAC (LTC2630), default 0xBFFF |
-| 0x0030-3F | | | reserved for the AD9361 SPI master |
+| 0x0030 | rw | SPI_XFER | write: start a 24-bit AD9361 transfer; read: {busy, last 24 bits in} |
+| 0x0031 | ro | SPI_RDATA | last 24 bits shifted in, [7:0] = value of a read |
+| 0x0032 | rw | SPI_HALF | SCLK half period in bus_clk cycles, default 10 (5 MHz) |
+
+Accesses to 0x0030/0x0031 wait in hardware until the previous SPI transfer is
+done, so one control packet can carry up to 14 SPI ops with no polling.
+
+### AD9361 SPI, see `fpga/u220/u220_spi.v`
+
+24-bit words: `[23]` write, `[17:8]` register, `[7:0]` data. The AD9361 needs
+**SPI mode 1** (MOSI changes on rising edges, MISO sampled before falling
+edges), which is how the vendor core runs it with UHD's settings. Found on the
+board with an A/B test against the vendor core:
+- mode 0 gives garbage
+- sampling MISO before the rising edge reads every value one bit late
+
+Product ID (0x037) reads `0x0A`: AD9361, revision 2, which matches UHD's check
+`(ID & 0xF8) == 0x08`. Write/readback works at 1, 5 and 10 MHz SCLK. At 16.7 MHz
+reads are one bit late. Batched reads take about 14 µs each above 5 MHz, so USB
+round trips set the pace there, not the SPI clock.
 
 ### Data endpoints (0x02 / 0x86), see `fpga/u220/u220_stream.v`
 
@@ -125,7 +144,8 @@ length in bytes. The GPIF interface checks this on the way in.
 ## Usage
 
 ```sh
-# simulate the own core (xsim): registers, loopback, generator with backpressure
+# simulate the own core (xsim): registers, loopback, generator with backpressure,
+# SPI against an AD9361 model
 fpga/u220/sim/run.sh
 
 # build (Vivado 2026.1, about 5 min); -> fpga/build/<target>/<target>.bin
@@ -143,6 +163,9 @@ python host/u220.py wr 0x0003 0x12345678
 python host/u220.py loopback
 python host/u220.py gen 5        # seconds
 python host/u220.py drain 5
+python host/u220.py ad9361 id          # releases reset, product ID, write/readback
+python host/u220.py ad9361 rd 0x000 16
+python host/u220.py ad9361 wr 0x006 0x00
 
 # B210-compatible image
 python host/b210compat_regs.py
@@ -155,7 +178,7 @@ and with UHD's B2xx images (`uhd_images_downloader`).
 
 ```
 fpga/build.tcl     build either target out of tree into fpga/build/
-fpga/u220/         own design (top, core, ctrl, stream, constraints, sim/)
+fpga/u220/         own design (top, core, ctrl, stream, spi, constraints, sim/)
 fpga/b210compat/   vendor B210-compatible design (top, b200_core, ppsloop, constraints)
 fpga/lib/          the subset of the Ettus/MicroPhase FPGA library both targets use
 fpga/ip/           Vivado IP (.xci only, regenerated into build/); <target>/ip.txt picks them

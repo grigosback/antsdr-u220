@@ -9,6 +9,9 @@
 // op word comes back as {op[63:32], read data}. The read happens in the same
 // cycle as the write, so a write returns the register's previous value.
 //
+// reg_wait holds the current op until it drops (used to make SPI accesses
+// wait for the previous transfer); the response is delayed accordingly.
+//
 // The length field must be right: the GPIF interface checks it against the
 // number of words it receives.
 
@@ -31,13 +34,14 @@ module u220_ctrl (
     output wire        reg_rd,     // one-cycle strobe: reg_rdata is being returned
     output wire [15:0] reg_addr,
     output wire [31:0] reg_wdata,
-    input  wire [31:0] reg_rdata   // combinational from reg_addr
+    input  wire [31:0] reg_rdata,  // combinational from reg_addr
+    input  wire        reg_wait    // combinational from reg_addr: don't take this op yet
 );
     reg expect_hdr;
 
-    assign i_tready  = ~o_tvalid | o_tready;
-    wire   accept    = i_tvalid & i_tready;
     wire   is_op     = ~expect_hdr;
+    assign i_tready  = (~o_tvalid | o_tready) & ~(is_op & reg_wait);
+    wire   accept    = i_tvalid & i_tready;
 
     assign reg_addr  = i_tdata[47:32];
     assign reg_wdata = i_tdata[31:0];

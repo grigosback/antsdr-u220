@@ -12,6 +12,7 @@ module tb_u220_core;
     logic [8:0]  cat_ctrl;
     logic [5:0]  fe_ctrl;
     logic [15:0] vctcxo_dac;
+    logic        spi_sclk, spi_sen_n, spi_mosi, spi_miso;
     int errors = 0;
     logic rx_en = 1;   // testbench only accepts RX data while a receiver is listening
 
@@ -22,7 +23,29 @@ module tb_u220_core;
         .tx_tdata, .tx_tlast, .tx_tvalid, .tx_tready,
         .rx_tdata, .rx_tlast, .rx_tvalid, .rx_tready,
         .cat_ctrl, .cat_ctrl_out(8'hA5), .fe_ctrl, .vctcxo_dac,
+        .spi_sclk, .spi_sen_n, .spi_mosi, .spi_miso,
         .led_heartbeat(), .led_activity());
+
+    // AD9361 SPI model: 24-bit words, [23] write, [17:8] address, [7:0] data.
+    // Mode 1 like the real chip: samples MOSI on falling edges, drives MISO on rising edges.
+    logic [7:0]  ad_regs [0:1023];
+    logic [23:0] ad_in;
+    logic [15:0] ad_instr;
+    int          ad_bits;
+    initial begin
+        foreach (ad_regs[i]) ad_regs[i] = 8'h00;
+        ad_regs[10'h037] = 8'h0A;   // product ID
+    end
+    always @(negedge spi_sen_n) begin ad_bits = 0; ad_in = 0; spi_miso = 0; end
+    always @(negedge spi_sclk) if (!spi_sen_n) begin
+        ad_in = {ad_in[22:0], spi_mosi};
+        ad_bits++;
+        if (ad_bits == 16) ad_instr = ad_in[15:0];
+        if (ad_bits == 24 && ad_in[23]) ad_regs[ad_in[17:8]] = ad_in[7:0];
+    end
+    always @(posedge spi_sclk) if (!spi_sen_n && ad_bits >= 16 && ad_bits < 24 && !ad_instr[15])
+        spi_miso <= #3 ad_regs[ad_instr[9:0]][23 - ad_bits];
+    always @(posedge spi_sen_n) spi_miso = 1'bz;
 
     // random backpressure
     always @(posedge clk) begin
@@ -96,7 +119,7 @@ module tb_u220_core;
                   op(0, 16'h0020, 0), op(0, 16'h0021, 0), op(0, 16'h0023, 0),
                   op(0, 16'h0099, 0)}, 16'd1, r);
         check("ID",            lo(r[1]), 32'h55323230);
-        check("VERSION",       lo(r[2]), 32'h00010000);
+        check("VERSION",       lo(r[2]), 32'h00010001);
         check("BUILD",         lo(r[3]), 32'hB01DB01D);
         check("SCRATCH old",   lo(r[4]), 32'h0);
         check("SCRATCH new",   lo(r[5]), 32'h12345678);
@@ -141,6 +164,18 @@ module tb_u220_core;
         transact({op(0, 16'h0012, 0), op(0, 16'h0014, 0)}, 16'd9, r);
         check("TX_PKTS", lo(r[1]), 0);           // cleared before the generator test
         if (lo(r[2]) < 3) begin $display("FAIL RX_PKTS %0d < 3", lo(r[2])); errors++; end
+
+        // ---- AD9361 SPI: write, read back, product ID, all in one control packet
+        transact({op(1, 16'h0030, (1 << 23) | (10'h005 << 8) | 8'h5A),
+                  op(1, 16'h0030, (10'h005 << 8)),
+                  op(0, 16'h0031, 0),
+                  op(1, 16'h0030, (10'h037 << 8)),
+                  op(0, 16'h0031, 0),
+                  op(0, 16'h0030, 0)}, 16'd20, r);
+        check("SPI readback 0x005", lo(r[3]) & 8'hFF, 8'h5A);
+        check("SPI product ID", lo(r[5]) & 8'hFF, 8'h0A);
+        check("SPI not busy after read", lo(r[6]) >> 31, 0);
+        check("model wrote 0x005", ad_regs[10'h005], 8'h5A);
 
         if (errors == 0) $display("PASS: all checks");
         else             $display("FAILED: %0d errors", errors);

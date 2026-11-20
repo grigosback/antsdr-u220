@@ -8,6 +8,10 @@ build/u220/u220.bin (see u220load.py).
   u220.py loopback [N]              send N random-size packets, check they come back
   u220.py gen [SECONDS] [THREADS]   FPGA->host throughput with the packet generator
   u220.py drain [SECONDS] [THREADS] host->FPGA throughput
+  u220.py ad9361 reset              pulse the AD9361 reset and leave it running
+  u220.py ad9361 id                 product ID + a write/readback check
+  u220.py ad9361 rd REG [N]         read N AD9361 registers
+  u220.py ad9361 wr REG VALUE       write an AD9361 register
 
 Protocol: see fpga/u220/u220_ctrl.v (control) and u220_stream.v (data).
 """
@@ -22,7 +26,7 @@ REG = dict(ID=0x0000, VERSION=0x0001, BUILD=0x0002, SCRATCH=0x0003, UPTIME_LO=0x
            UPTIME_HI=0x0005, BUS_CLK_HZ=0x0006, STREAM_MODE=0x0010, GEN_LEN=0x0011,
            TX_PKTS=0x0012, TX_WORDS=0x0013, RX_PKTS=0x0014, RX_WORDS=0x0015,
            STREAM_CLEAR=0x0016, CAT_CTRL=0x0020, CAT_CTRL_OUT=0x0021, FE_CTRL=0x0022,
-           VCTCXO_DAC=0x0023)
+           VCTCXO_DAC=0x0023, SPI_XFER=0x0030, SPI_RDATA=0x0031, SPI_HALF=0x0032)
 MODE_DRAIN, MODE_LOOP, MODE_GEN = 0, 1, 2
 ID_U220 = 0x55323230
 
@@ -110,6 +114,94 @@ class U220:
         self.wr(REG['STREAM_CLEAR'], 1)
         if mode != MODE_DRAIN:
             self.wr(REG['STREAM_MODE'], mode)
+
+
+class AD9361:
+    """AD9361 register access through the FPGA's SPI master (u220_spi.v).
+
+    The FPGA holds SPI register accesses until the previous transfer is done,
+    so a batch of reads/writes goes out in one control packet per 14 ops.
+    """
+    RESETN = 1 << 0
+    PRODUCT_ID = 0x037
+
+    def __init__(self, u):
+        self.u = u
+
+    def reset(self):
+        cat = self.u.rd(REG['CAT_CTRL'])
+        self.u.wr(REG['CAT_CTRL'], cat & ~self.RESETN)
+        time.sleep(0.001)
+        self.u.wr(REG['CAT_CTRL'], cat | self.RESETN)
+        time.sleep(0.001)
+
+    def in_reset(self):
+        return not self.u.rd(REG['CAT_CTRL']) & self.RESETN
+
+    @staticmethod
+    def _word(write, reg, val=0):
+        return (int(write) << 23) | ((reg & 0x3FF) << 8) | (val & 0xFF)
+
+    def peek_many(self, regs):
+        ops = []
+        for r in regs:
+            ops += [(1, REG['SPI_XFER'], self._word(0, r)), (0, REG['SPI_RDATA'], 0)]
+        vals = self.u.transact(ops)
+        return [v & 0xFF for v in vals[1::2]]
+
+    def poke_many(self, pairs):
+        self.u.transact([(1, REG['SPI_XFER'], self._word(1, r, v)) for r, v in pairs]
+                        + [(0, REG['SPI_RDATA'], 0)])   # waits for the last write
+
+    def peek(self, reg):
+        return self.peek_many([reg])[0]
+
+    def poke(self, reg, val):
+        self.poke_many([(reg, val)])
+
+
+def cmd_ad9361(u, args):
+    ad = AD9361(u)
+    sub = args[0] if args else 'id'
+    num = lambda x: int(x, 0)
+    if sub != 'reset' and ad.in_reset():
+        print('AD9361 is held in reset; releasing it')
+        ad.reset()
+    if sub == 'reset':
+        ad.reset()
+        print('AD9361 reset pulsed, now running')
+    elif sub == 'id':
+        pid = ad.peek(ad.PRODUCT_ID)
+        print(f'product ID 0x{pid:02x} (product {pid >> 3}, revision {pid & 7}): '
+              f'{"OK" if pid & 0xF8 == 0x08 else "UNEXPECTED, UHD expects (ID & 0xF8) == 0x08"}')
+        # write/readback on 0x006 (RX clock/data delay: no effect until data streams)
+        old = ad.peek(0x006)
+        pattern = [0x5A, 0xA5, 0x00, 0xFF]
+        got = []
+        for v in pattern:
+            ad.poke(0x006, v)
+            got.append(ad.peek(0x006))
+        ad.poke(0x006, old)
+        ok = got == pattern and ad.peek(0x006) == old
+        print(f'write/readback on 0x006: wrote {[hex(v) for v in pattern]}, read {[hex(v) for v in got]}, '
+              f'restored 0x{old:02x}: {"OK" if ok else "FAILED"}')
+        t = time.time()
+        n = 1024
+        ad.peek_many([ad.PRODUCT_ID] * n)
+        dt = time.time() - t
+        print(f'{n} batched reads in {dt * 1e3:.0f} ms ({dt / n * 1e6:.0f} us per read at '
+              f'{100e6 / (2 * u.rd(REG["SPI_HALF"])) / 1e6:g} MHz SCLK)')
+        return ok and pid & 0xF8 == 0x08
+    elif sub == 'rd':
+        reg, n = num(args[1]), num(args[2]) if len(args) > 2 else 1
+        for i, v in enumerate(ad.peek_many(range(reg, reg + n))):
+            print(f'0x{reg + i:03x}: 0x{v:02x}')
+    elif sub == 'wr':
+        reg, val = num(args[1]), num(args[2])
+        old = ad.peek(reg)
+        ad.poke(reg, val)
+        print(f'0x{reg:03x}: 0x{old:02x} -> 0x{ad.peek(reg):02x}')
+    return True
 
 
 def cmd_info(u):
@@ -249,5 +341,7 @@ if __name__ == '__main__':
         sys.exit(0 if cmd_gen(u, float(rest[0]) if rest else 5.0, int(rest[1]) if len(rest) > 1 else 4) else 1)
     elif cmd == 'drain':
         sys.exit(0 if cmd_drain(u, float(rest[0]) if rest else 5.0, int(rest[1]) if len(rest) > 1 else 4) else 1)
+    elif cmd == 'ad9361':
+        sys.exit(0 if cmd_ad9361(u, rest) else 1)
     else:
         sys.exit(__doc__)

@@ -25,14 +25,20 @@
 //                            [4] FE_RX2_SEL1, [5] FE_TXRX2_SEL1. Default 0: amps off.
 //   0x0023 rw  VCTCXO_DAC    40 MHz oscillator trim DAC, default 0xBFFF (same as stock)
 //
-//   0x0030-0x003F            reserved for the AD9361 SPI master
+//   0x0030 rw  SPI_XFER      write: start a 24-bit AD9361 transfer (see u220_spi.v)
+//                            read: {busy, 7'b0, last 24 bits shifted in}
+//   0x0031 ro  SPI_RDATA     last 24 bits shifted in; [7:0] = register value of a read
+//   0x0032 rw  SPI_HALF      SCLK half period in bus_clk cycles, default 10 (5 MHz).
+//                            Reads work up to 10 MHz on the board; at 16.7 MHz MISO is one bit late.
+//   Accesses to 0x0030 and 0x0031 wait in hardware until the previous transfer
+//   is done, so a control packet can carry several SPI writes and reads back to back.
 //
 // Unmapped addresses read 0xDEADBEEF.
 
 `default_nettype none
 module u220_core #(
     parameter [15:0] VERSION_MAJOR = 16'd1,
-    parameter [15:0] VERSION_MINOR = 16'd0,
+    parameter [15:0] VERSION_MINOR = 16'd1,
     parameter [31:0] BUS_CLK_HZ    = 32'd100_000_000
 )(
     input  wire        clk,
@@ -49,6 +55,11 @@ module u220_core #(
     output reg  [5:0]  fe_ctrl,
     output reg  [15:0] vctcxo_dac,
 
+    output wire        spi_sclk,
+    output wire        spi_sen_n,
+    output wire        spi_mosi,
+    input  wire        spi_miso,
+
     output wire        led_heartbeat,
     output wire        led_activity
 );
@@ -57,12 +68,14 @@ module u220_core #(
     wire [15:0] reg_addr;
     wire [31:0] reg_wdata;
     reg  [31:0] reg_rdata;
+    wire        reg_wait;
 
     u220_ctrl ctrl (
         .clk(clk), .rst(rst),
         .i_tdata(ctrl_tdata), .i_tlast(ctrl_tlast), .i_tvalid(ctrl_tvalid), .i_tready(ctrl_tready),
         .o_tdata(resp_tdata), .o_tlast(resp_tlast), .o_tvalid(resp_tvalid), .o_tready(resp_tready),
-        .reg_wr(reg_wr), .reg_rd(reg_rd), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_rdata(reg_rdata));
+        .reg_wr(reg_wr), .reg_rd(reg_rd), .reg_addr(reg_addr), .reg_wdata(reg_wdata), .reg_rdata(reg_rdata),
+        .reg_wait(reg_wait));
 
     // --------------------------------------------------------------- registers
     reg  [31:0] scratch;
@@ -72,6 +85,10 @@ module u220_core #(
     reg  [12:0] gen_len;
     reg         stream_clear;
     reg  [7:0]  cat_ctrl_out_s1, cat_ctrl_out_s2;
+    reg  [15:0] spi_half;
+    wire        spi_busy;
+    wire [23:0] spi_rdata;
+    assign reg_wait = spi_busy & (reg_addr == 16'h0030 || reg_addr == 16'h0031);
     wire [31:0] tx_pkts, tx_words, rx_pkts, rx_words;
 
     always @(posedge clk) begin
@@ -93,6 +110,7 @@ module u220_core #(
             cat_ctrl        <= 9'h01E;
             fe_ctrl         <= 6'd0;
             vctcxo_dac      <= 16'hBFFF;
+            spi_half        <= 16'd10;
         end else begin
             stream_clear <= 1'b0;
             if (reg_rd && reg_addr == 16'h0004)
@@ -106,6 +124,7 @@ module u220_core #(
                     16'h0020: cat_ctrl     <= reg_wdata[8:0];
                     16'h0022: fe_ctrl      <= reg_wdata[5:0];
                     16'h0023: vctcxo_dac   <= reg_wdata[15:0];
+                    16'h0032: spi_half     <= reg_wdata[15:0];
                     default: ;
                 endcase
         end
@@ -131,9 +150,19 @@ module u220_core #(
             16'h0021: reg_rdata = {24'd0, cat_ctrl_out_s2};
             16'h0022: reg_rdata = {26'd0, fe_ctrl};
             16'h0023: reg_rdata = {16'd0, vctcxo_dac};
+            16'h0030: reg_rdata = {spi_busy, 7'd0, spi_rdata};
+            16'h0031: reg_rdata = {8'd0, spi_rdata};
+            16'h0032: reg_rdata = {16'd0, spi_half};
             default:  reg_rdata = 32'hDEADBEEF;
         endcase
     end
+
+    // --------------------------------------------------------------- AD9361 SPI
+    u220_spi spi (
+        .clk(clk), .rst(rst), .half_period(spi_half),
+        .start(reg_wr && reg_addr == 16'h0030), .wdata(reg_wdata[23:0]),
+        .busy(spi_busy), .rdata(spi_rdata),
+        .sclk(spi_sclk), .sen_n(spi_sen_n), .mosi(spi_mosi), .miso(spi_miso));
 
     // ----------------------------------------------------------------- streams
     u220_stream stream (
