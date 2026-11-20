@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Talk to the U220 FPGA's local control core (b200_core.v) over USB, no UHD.
+"""Talk to the B210-compatible image (fpga/b210compat, b200_core.v) over USB, no UHD.
 
-  u220regs.py            read all 4 core readback registers
-  u220regs.py peek N     select readback N (0-3) and print it
-  u220regs.py poke A V   write setting register A (0-255) with 32-bit value V
+  b210compat_regs.py            read all 4 core readback registers
+  b210compat_regs.py peek N     select readback N (0-3) and print it
+  b210compat_regs.py poke A V   write setting register A (0-255) with 32-bit value V
 
 Packet format (radio_ctrl_proc.v), sent as little-endian 32-bit words:
   cmd : [hdr_hi][sid][addr][data]           hdr_hi = 0x8 << 28 | seq << 16 | 16 bytes

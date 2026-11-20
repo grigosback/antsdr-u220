@@ -1,0 +1,3 @@
+fifo_4k_2clk
+fifo_short_2clk
+gen_clks
