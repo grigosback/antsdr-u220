@@ -1,0 +1,8 @@
+# Vivado build tree and outputs
+fpga/build/
+.Xil/
+*.jou
+*.log
+*.str
+__pycache__/
+*.pyc
