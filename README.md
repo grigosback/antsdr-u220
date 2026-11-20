@@ -133,6 +133,39 @@ length in bytes. The GPIF interface checks this on the way in.
 
 `U220.send_data()` and `U220.recv_data()` in `host/u220.py` handle both.
 
+### AD9361 bring-up with UHD's driver, see `host/cpp`
+
+`host/cpp` is a small C++ library (libusb) for the own design. It includes
+UHD's AD9361 driver (`ad9361_device.cpp`), vendored together with UHD's
+filter and sensor types and minimal stand-ins for the rest of UHD. The driver
+only needs `peek8`/`poke8`, which go through the FPGA SPI master. The board
+parameters are UHD's B200/B210 values: LVCMOS DDR FDD interface, XTAL_N clock
+path, RX/TX delays 0/0xF.
+
+```sh
+cmake -S host/cpp -B host/cpp/build && cmake --build host/cpp/build
+host/cpp/build/u220_ad9361 --rate 30.72e6 --freq 2.4e9 --gain 60 --bw 20e6
+```
+
+`u220_ad9361` resets the AD9361 and runs UHD's `initialize()` (BBPLL,
+calibrations). It then sets the clock rate, enables only the RX chains, tunes,
+and reports the PLL locks, the ENSM state, the temperature and RSSI. TX chains
+stay disabled, TX gain stays at minimum, and it refuses to run if the board's
+TX amplifiers are on in `FE_CTRL`.
+
+On the board, these all ended with the BBPLL and RX synthesizer locked and the
+ENSM in FDD:
+
+| Clock rate | RX frequency | Chains |
+|---|---|---|
+| 16 MHz | 100 MHz | RX1+RX2 |
+| 30.72 MHz | 2.4 GHz | RX1+RX2 |
+| 61.44 MHz | 5.8 GHz | RX1 |
+| 1 MHz | 433.92 MHz | RX2 |
+
+A full init at 16 MHz is about 1 s and about 4,700 SPI transfers. The FPGA
+doesn't receive samples yet, so the RF path itself is untested.
+
 ### Measured on the board (USB 3, Python + pyusb, 4 threads)
 
 | Test | Result |
@@ -183,6 +216,7 @@ fpga/b210compat/   vendor B210-compatible design (top, b200_core, ppsloop, const
 fpga/lib/          the subset of the Ettus/MicroPhase FPGA library both targets use
 fpga/ip/           Vivado IP (.xci only, regenerated into build/); <target>/ip.txt picks them
 host/              loader, own-design tool, B210-compat register tool, bitstream chip-ID checker
+host/cpp/          C++ library (libusb) + UHD's AD9361 driver + u220_ad9361 bring-up tool
 ```
 
 ## Changes from the vendor project
@@ -199,9 +233,18 @@ host/              loader, own-design tool, B210-compat register tool, bitstream
 - `b210compat`: `u220.xdc:75-76` constrain `FPGA_RXD0/TXD0`, which aren't ports of that top.
 - Both: the vendor constraints set `SLEW` on some input pins, which Vivado ignores.
 
+## DSP
+
+The own design has no DSP yet: it doesn't touch the AD9361 sample interface
+at all. The `b210compat` design is UHD's B210 radio. Per channel it has a DDC
+(CORDIC frequency shift, CIC decimator and half-band filters) and a DUC
+(CORDIC, CIC interpolator, half-band filters), timestamped VITA/CHDR framing
+and sample format conversion. It uses 100 of the 740 DSP48 slices.
+
 ## License
 
 The FPGA sources come from Ettus Research's UHD and MicroPhase's antsdr_uhd and
 keep their original licenses: most file headers say LGPL-3.0-or-later and a few
-say GPL. The vendor repo ships GPL-3.0, copied here as `LICENSE`, which also
-covers the host tools.
+say GPL. `host/cpp/third_party/uhd` is UHD host code (GPL-3.0-or-later). The
+vendor repo ships GPL-3.0, copied here as `LICENSE`, which also covers the
+host tools.

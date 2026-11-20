@@ -6,3 +6,4 @@ fpga/build/
 *.str
 __pycache__/
 *.pyc
+host/cpp/build/
