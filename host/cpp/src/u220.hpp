@@ -31,7 +31,19 @@ constexpr uint16_t STREAM_CLEAR = 0x0016;
 constexpr uint16_t CAT_CTRL = 0x0020, CAT_CTRL_OUT = 0x0021, FE_CTRL = 0x0022;
 constexpr uint16_t VCTCXO_DAC = 0x0023;
 constexpr uint16_t SPI_XFER = 0x0030, SPI_RDATA = 0x0031, SPI_HALF = 0x0032;
+constexpr uint16_t RADIO_CTRL = 0x0040, RADIO_SPP = 0x0041, RADIO_STATUS = 0x0042;
+constexpr uint16_t RADIO_CLK_HZ = 0x0043, RADIO_PKTS = 0x0044, RADIO_DROPS = 0x0045;
 } // namespace reg
+
+// STREAM_MODE values
+constexpr uint32_t STREAM_DRAIN = 0, STREAM_LOOP = 1, STREAM_GEN = 2, STREAM_RADIO = 3;
+
+// RADIO_CTRL bits
+constexpr uint32_t RADIO_ENABLE = 1u << 0, RADIO_MIMO = 1u << 1, RADIO_TEST = 1u << 2,
+                   RADIO_RESET = 1u << 3;
+// RADIO_STATUS bits
+constexpr uint32_t RADIO_ST_FRAME = 0xF, RADIO_ST_XOVF = 1u << 4, RADIO_ST_RUNNING = 1u << 5,
+                   RADIO_ST_POVF = 1u << 6, RADIO_ST_IDLE = 1u << 7;
 
 constexpr uint32_t ID_U220 = 0x55323230;
 constexpr uint32_t CAT_RESETN = 1u << 0;
@@ -61,6 +73,12 @@ public:
     void ad9361_reset();   // pulse RESETn, leave the chip running
 
     uint32_t version() { return rd(reg::VERSION); }
+
+    // data endpoints, for streaming (rx_stream)
+    static constexpr uint8_t EP_DATA_IN = 0x86, EP_DATA_OUT = 0x02;
+    libusb_context* usb_context() { return _ctx; }
+    libusb_device_handle* usb_handle() { return _h; }
+    size_t flush_data_in();   // drop whatever is waiting on EP_DATA_IN, returns bytes
 
 private:
     libusb_context* _ctx = nullptr;

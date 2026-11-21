@@ -1,7 +1,8 @@
 # ANTSDR U220 without vendor software
 
 Build your own FPGA images for the MicroPhase ANTSDR U220 (AD9361 version) and
-talk to them over USB from Python, without UHD, GNU Radio or MicroPhase tools.
+talk to them over USB from Python and C++, without UHD, GNU Radio or MicroPhase
+tools. The own design streams AD9361 RX samples at up to 61.44 MS/s.
 
 The starting point is MicroPhase's B210-compatible design from
 [antsdr_uhd v1.0](https://github.com/MicroPhase/antsdr_uhd/tree/v1.0/firmware/fpga/antsdr_u220),
@@ -15,7 +16,7 @@ really on this board.
 | FPGA | Xilinx Artix-7 **XC7A200T** | Package assumed FBG484, speed grade unknown, so builds target -1 |
 | USB | Cypress FX3 (CYUSB3014) | Bridges USB 3 to the FPGA over a 32-bit GPIF II slave FIFO |
 | RF | AD9361 | Its SPI, control and data lines all go to the FPGA |
-| Clock | 40 MHz always-on oscillator, AD5662 DAC for trimming, PPS/10 MHz/GPS inputs | |
+| Clock | 40 MHz always-on oscillator, LTC2630 DAC for trimming, PPS/10 MHz/GPS inputs | The vendor pin names say AD5662 |
 | Debug | 6-pin 2.54 mm JTAG header | |
 
 **Two U220 versions exist.** MicroPhase's vendor repo targets `xc7a100tfgg484-2`,
@@ -57,7 +58,7 @@ loaded, because the bootloader always shows 480M.
 
 | Target | Top | What it is |
 |---|---|---|
-| `u220` | `fpga/u220/u220_top.v` | **Own design**: register file, USB loopback, packet generator, AD9361 SPI master. AD9361 held in reset at power-up, TX amps off |
+| `u220` | `fpga/u220/u220_top.v` | **Own design**: register file, USB loopback, packet generator, AD9361 SPI master, RX sample streaming (1 or 2 channels). AD9361 held in reset at power-up, TX amps off, TX data port idle |
 | `b210compat` | `fpga/b210compat/antsdr_u220.v` | MicroPhase's B210-compatible design, retargeted to the 200T. Known-good reference |
 
 Both share `fpga/lib` (Ettus/MicroPhase library subset) and `fpga/ip`.
@@ -91,7 +92,7 @@ register's previous value.
 | 0x0003 | rw | SCRATCH | |
 | 0x0004/5 | ro | UPTIME_LO/HI | bus_clk cycles, reading LO latches HI |
 | 0x0006 | ro | BUS_CLK_HZ | 100 MHz |
-| 0x0010 | rw | STREAM_MODE | 0 drain, 1 loopback, 2 generator |
+| 0x0010 | rw | STREAM_MODE | 0 drain, 1 loopback, 2 generator, 3 RX samples |
 | 0x0011 | rw | GEN_LEN | generator payload words/packet (1021 = 8176-byte packets) |
 | 0x0012-15 | ro | TX_PKTS, TX_WORDS, RX_PKTS, RX_WORDS | data counters |
 | 0x0016 | wo | STREAM_CLEAR | clear counters and generator |
@@ -102,6 +103,11 @@ register's previous value.
 | 0x0030 | rw | SPI_XFER | write: start a 24-bit AD9361 transfer; read: {busy, last 24 bits in} |
 | 0x0031 | ro | SPI_RDATA | last 24 bits shifted in, [7:0] = value of a read |
 | 0x0032 | rw | SPI_HALF | SCLK half period in bus_clk cycles, default 10 (5 MHz) |
+| 0x0040 | rw | RADIO_CTRL | [0] enable, [1] two channels, [2] test counter, [3] reset (default 1) |
+| 0x0041 | rw | RADIO_SPP | sample words per packet, 1..2000, default 1020 (8176-byte packets) |
+| 0x0042 | ro | RADIO_STATUS | RX_FRAME patterns seen, overflow flags, running, idle |
+| 0x0043 | ro | RADIO_CLK_HZ | measured AD9361 DATA_CLK, 10 Hz resolution |
+| 0x0044/5 | ro | RADIO_PKTS, RADIO_DROPS | sample packets sent / dropped |
 
 Accesses to 0x0030/0x0031 wait in hardware until the previous SPI transfer is
 done, so one control packet can carry up to 14 SPI ops with no polling.
@@ -163,10 +169,66 @@ ENSM in FDD:
 | 61.44 MHz | 5.8 GHz | RX1 |
 | 1 MHz | 433.92 MHz | RX2 |
 
-A full init at 16 MHz is about 1 s and about 4,700 SPI transfers. The FPGA
-doesn't receive samples yet, so the RF path itself is untested.
+A full init at 16 MHz is about 1 s and about 4,700 SPI transfers.
 
-### Measured on the board (USB 3, Python + pyusb, 4 threads)
+### RX samples, see `fpga/u220/u220_rx_io.v`, `fpga/u220/u220_radio.v`
+
+**Capture.** The AD9361 data port runs in CMOS DDR FDD mode: 12 bits, I on one
+edge of DATA_CLK and Q on the other. The FPGA captures it exactly like the
+vendor design (`DATA_CLK -> BUFR -> IDDR`, then a BUFG for the rest), because
+that structure is known to work with UHD's interface delays. DATA_CLK equals
+the sample rate on one channel. With two channels it is twice the rate, and
+RX_FRAME is high for RX1 and low for RX2. `RADIO_CLK_HZ` measures it.
+
+**Samples.** Samples are 16-bit I and Q with the 12 bits left-justified, the
+usual `sc16` layout. Two samples go in each 64-bit word: consecutive samples on
+one channel, or `{RX1, RX2}` of the same instant on two channels. The words
+cross into bus_clk through a 16-deep gray-code FIFO (`u220_cdc_fifo.v`), and
+the bus_clk side always reads it, so it can't overflow.
+
+**Packets** (endpoint 0x86):
+
+```
+word 0  [63:48] seq  [47:32] length in bytes  [31:8] "SMP"  [7:0] flags
+word 1  time: per-channel sample count of the first sample
+word 2+ two samples each
+flags   [0] packets were dropped before this one  [1] two channels
+```
+
+A packet only starts if the 64 KB packet FIFO has room for all of it.
+Otherwise the whole packet is dropped, the time keeps counting and the next
+packet is flagged. A slow host therefore loses whole packets, never parts of
+them, and can count exactly how many samples it missed.
+
+**Rules.** Hold `RADIO_CTRL[3]` (reset) while the AD9361 is reset or its clocks
+change, and while changing the channel count or the test mode. Reset pads an
+unfinished packet with zeros, so the USB side never sees a partial packet.
+Clearing enable finishes the current packet and stops.
+
+```sh
+host/cpp/build/u220_rx --rate 20e6 --freq 98e6 --gain 40 --rx1 --num 20e6 --out fm.cs16
+python host/iq_spectrum.py fm.cs16 --rate 20e6 --freq 98e6 --png fm.png
+host/cpp/build/u220_rx --test --rate 61.44e6 --rx1 --num 3.7e9 --discard   # 60 s stress test
+host/cpp/build/u220_rx --rate 61.44e6 --rx1 --bist 0 --num 4e6 --out bist.cs16
+```
+
+`u220_rx` sets up the AD9361 (RX only), checks DATA_CLK, streams, and checks
+the sequence number and time of every packet. `--test` replaces the samples
+with a counter in the FPGA and checks every sample. `--bist` makes the AD9361
+inject a digital tone at its data port instead of ADC data. A clean tone means
+every bit of the capture is right, which an RF signal can't show.
+
+Measured on the board (C++, libusb, 32 async transfers):
+
+| Test | Result |
+|---|---|
+| test counter, 1 channel, 61.44 MS/s | 246 MB/s for 60 s, 3.7 G samples, 0 drops, 0 errors |
+| test counter, 2 channels, 30.72 MS/s | 246 MB/s, DATA_CLK 61.44 MHz, 0 drops, 0 errors |
+| AD9361 tone, 61.44 MS/s (DATA_CLK 61.44 MHz) | tone exactly at rate/32, image −178 dB, floor −194 dBFS: no capture bit errors |
+| AD9361 tone, 2 channels, mask on RX2 | RX2 reads exact zeros, RX1 unaffected: channels are not swapped |
+| FM band, 98 MHz LO, 20 MS/s | stations visible; retuning the LO by 1 MHz leaves them at the same RF frequencies, so I/Q are not swapped |
+
+### USB throughput (USB 3, Python + pyusb, 4 threads)
 
 | Test | Result |
 |---|---|
@@ -178,7 +240,7 @@ doesn't receive samples yet, so the RF path itself is untested.
 
 ```sh
 # simulate the own core (xsim): registers, loopback, generator with backpressure,
-# SPI against an AD9361 model
+# SPI against an AD9361 model, RX sample path with a fake AD9361 data port
 fpga/u220/sim/run.sh
 
 # build (Vivado 2026.1, about 5 min); -> fpga/build/<target>/<target>.bin
@@ -211,12 +273,14 @@ and with UHD's B2xx images (`uhd_images_downloader`).
 
 ```
 fpga/build.tcl     build either target out of tree into fpga/build/
-fpga/u220/         own design (top, core, ctrl, stream, spi, constraints, sim/)
+fpga/u220/         own design (top, core, ctrl, stream, spi, rx_io, radio, cdc_fifo, constraints, sim/)
 fpga/b210compat/   vendor B210-compatible design (top, b200_core, ppsloop, constraints)
 fpga/lib/          the subset of the Ettus/MicroPhase FPGA library both targets use
 fpga/ip/           Vivado IP (.xci only, regenerated into build/); <target>/ip.txt picks them
-host/              loader, own-design tool, B210-compat register tool, bitstream chip-ID checker
-host/cpp/          C++ library (libusb) + UHD's AD9361 driver + u220_ad9361 bring-up tool
+host/              loader, own-design tool, B210-compat register tool, bitstream chip-ID checker,
+                   iq_spectrum.py (spectrum of a cs16 capture)
+host/cpp/          C++ library (libusb) + UHD's AD9361 driver; tools u220_ad9361 (bring-up)
+                   and u220_rx (sample streaming)
 ```
 
 ## Changes from the vendor project
@@ -235,8 +299,10 @@ host/cpp/          C++ library (libusb) + UHD's AD9361 driver + u220_ad9361 brin
 
 ## DSP
 
-The own design has no DSP yet: it doesn't touch the AD9361 sample interface
-at all. The `b210compat` design is UHD's B210 radio. Per channel it has a DDC
+The own design sends raw AD9361 samples and has no DSP in the FPGA yet. The
+AD9361 does its own filtering and decimation (FIR and half-band stages that
+UHD's driver configures), so its samples can go straight to USB. The
+`b210compat` design is UHD's B210 radio. Per channel it has a DDC
 (CORDIC frequency shift, CIC decimator and half-band filters) and a DUC
 (CORDIC, CIC interpolator, half-band filters), timestamped VITA/CHDR framing
 and sample format conversion. It uses 100 of the 740 DSP48 slices.

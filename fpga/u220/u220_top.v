@@ -5,7 +5,9 @@
 //   - gen_clks: MMCM, 40 MHz in -> 100 MHz bus_clk and gpif_clk
 // Everything else is u220_core. At power-up the AD9361 is held in reset
 // (CAT_CTRL), the TX amplifiers are off (FE_CTRL), and every other output sits
-// at a fixed idle level. The AD9361 SPI is driven by u220_spi.
+// at a fixed idle level. The AD9361 SPI is driven by u220_spi, the RX data
+// port is captured by u220_rx_io and packetized by u220_radio. The TX data
+// port is not driven yet (all zeros).
 
 `default_nettype none
 module u220_top (
@@ -22,7 +24,7 @@ module u220_top (
     output wire [3:0]  CAT_CTL_IN,
     input  wire [7:0]  CAT_CTL_OUT,
 
-    // AD9361 data port (CMOS, 12-bit): unused for now
+    // AD9361 data port (CMOS, 12-bit DDR): RX captured, TX idle
     input  wire        CAT_DCLK_P,
     output wire        CAT_FBCLK_P,
     output wire        CAT_FBCLK_N,
@@ -116,6 +118,13 @@ module u220_top (
     wire        ctrl_tvalid, resp_tvalid, tx_tvalid, rx_tvalid;
     wire        ctrl_tready, resp_tready, tx_tready, rx_tready;
 
+    wire        radio_clk, cap_fr_r, cap_fr_f;
+    wire [11:0] cap_i, cap_q;
+
+    u220_rx_io rx_io (
+        .dclk(CAT_DCLK_P), .rx_frame(CAT_RX_FR_P), .rx_data(CAT_P0_D),
+        .radio_clk(radio_clk), .cap_i(cap_i), .cap_q(cap_q), .cap_fr_r(cap_fr_r), .cap_fr_f(cap_fr_f));
+
     wire [8:0]  cat_ctrl;
     wire [5:0]  fe_ctrl;
     wire [15:0] vctcxo_dac;
@@ -129,6 +138,7 @@ module u220_top (
         .rx_tdata(rx_tdata), .rx_tlast(rx_tlast), .rx_tvalid(rx_tvalid), .rx_tready(rx_tready),
         .cat_ctrl(cat_ctrl), .cat_ctrl_out(CAT_CTL_OUT), .fe_ctrl(fe_ctrl), .vctcxo_dac(vctcxo_dac),
         .spi_sclk(CAT_SPI_CLK), .spi_sen_n(CAT_SPI_EN), .spi_mosi(CAT_SPI_DI), .spi_miso(CAT_SPI_DO),
+        .radio_clk(radio_clk), .cap_i(cap_i), .cap_q(cap_q), .cap_fr_r(cap_fr_r), .cap_fr_f(cap_fr_f),
         .led_heartbeat(led_heartbeat), .led_activity(led_activity));
 
     // ------------------------------------------------------------------- FX3

@@ -139,6 +139,16 @@ void device::ad9361_poke(uint16_t r, uint8_t value)
     transact({{true, reg::SPI_XFER, spi_word(true, r, value)}, {false, reg::SPI_RDATA, 0}});
 }
 
+size_t device::flush_data_in()
+{
+    size_t n = 0;
+    for (;;) {
+        auto b = _bulk_in(EP_DATA_IN, 16384, 20);
+        if (b.empty()) return n;
+        n += b.size();
+    }
+}
+
 void device::ad9361_reset()
 {
     uint32_t cat = rd(reg::CAT_CTRL);

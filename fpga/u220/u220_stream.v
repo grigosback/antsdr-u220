@@ -5,6 +5,8 @@
 //   mode 2  generator  FPGA sends packets as fast as USB takes them:
 //                      header {seq, length bytes, "GEN0"} + gen_len words of a
 //                      64-bit counter that keeps counting across packets
+//   mode 3  radio      FPGA sends the AD9361 sample packets from u220_radio;
+//                      host->FPGA packets are dropped as in mode 0
 //
 // Mode changes take effect at packet boundaries on each side.
 
@@ -26,12 +28,17 @@ module u220_stream (
     output wire        rx_tvalid,
     input  wire        rx_tready,
 
+    input  wire [63:0] radio_tdata,
+    input  wire        radio_tlast,
+    input  wire        radio_tvalid,
+    output wire        radio_tready,
+
     output reg  [31:0] tx_pkts,
     output reg  [31:0] tx_words,
     output reg  [31:0] rx_pkts,
     output reg  [31:0] rx_words
 );
-    localparam MODE_DRAIN = 2'd0, MODE_LOOP = 2'd1, MODE_GEN = 2'd2;
+    localparam MODE_DRAIN = 2'd0, MODE_LOOP = 2'd1, MODE_GEN = 2'd2, MODE_RADIO = 2'd3;
 
     // ---------------------------------------------------------------- tx side
     reg  tx_inpkt, tx_loop;
@@ -98,12 +105,16 @@ module u220_stream (
     reg  [1:0] rx_sel;
     wire [1:0] rx_sel_now = rx_inpkt ? rx_sel : mode;
 
-    assign rx_tdata   = (rx_sel_now == MODE_GEN) ? gen_tdata : lb_tdata;
-    assign rx_tlast   = (rx_sel_now == MODE_GEN) ? gen_tlast : lb_tlast;
-    assign rx_tvalid  = (rx_sel_now == MODE_GEN) ? 1'b1 :
-                        (rx_sel_now == MODE_LOOP) ? lb_tvalid : 1'b0;
-    assign lb_tready  = (rx_sel_now == MODE_LOOP) & rx_tready;
-    assign gen_tready = (rx_sel_now == MODE_GEN) & rx_tready;
+    assign rx_tdata   = (rx_sel_now == MODE_GEN)   ? gen_tdata :
+                        (rx_sel_now == MODE_RADIO) ? radio_tdata : lb_tdata;
+    assign rx_tlast   = (rx_sel_now == MODE_GEN)   ? gen_tlast :
+                        (rx_sel_now == MODE_RADIO) ? radio_tlast : lb_tlast;
+    assign rx_tvalid  = (rx_sel_now == MODE_GEN)   ? 1'b1 :
+                        (rx_sel_now == MODE_RADIO) ? radio_tvalid :
+                        (rx_sel_now == MODE_LOOP)  ? lb_tvalid : 1'b0;
+    assign lb_tready    = (rx_sel_now == MODE_LOOP)  & rx_tready;
+    assign gen_tready   = (rx_sel_now == MODE_GEN)   & rx_tready;
+    assign radio_tready = (rx_sel_now == MODE_RADIO) & rx_tready;
     wire   rx_xfer    = rx_tvalid & rx_tready;
 
     always @(posedge clk)

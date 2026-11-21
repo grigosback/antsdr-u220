@@ -23,7 +23,7 @@ target_include_directories(uhd_ad9361 PUBLIC
 target_link_libraries(uhd_ad9361 PUBLIC Boost::headers)
 target_compile_options(uhd_ad9361 PRIVATE -w)
 
-add_library(u220 STATIC src/u220.cpp)
+add_library(u220 STATIC src/u220.cpp src/radio.cpp src/rx_stream.cpp)
 target_include_directories(u220 PUBLIC src)
 target_link_libraries(u220 PUBLIC uhd_ad9361 PkgConfig::LIBUSB)
 target_compile_options(u220 PRIVATE -Wall -Wextra)
@@ -31,3 +31,7 @@ target_compile_options(u220 PRIVATE -Wall -Wextra)
 add_executable(u220_ad9361 tools/u220_ad9361.cpp)
 target_link_libraries(u220_ad9361 PRIVATE u220)
 target_compile_options(u220_ad9361 PRIVATE -Wall -Wextra)
+
+add_executable(u220_rx tools/u220_rx.cpp)
+target_link_libraries(u220_rx PRIVATE u220)
+target_compile_options(u220_rx PRIVATE -Wall -Wextra)

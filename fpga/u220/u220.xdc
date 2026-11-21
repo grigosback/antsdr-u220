@@ -167,3 +167,11 @@ set_property  -dict {PACKAGE_PIN  P17  IOSTANDARD LVCMOS33 } [get_ports tx_amp_e
 set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
 # build timestamp readable at register 0x0002
 set_property BITSTREAM.CONFIG.USR_ACCESS TIMESTAMP [current_design]
+
+# AD9361 DATA_CLK: up to 61.44 MHz (one channel at 61.44 MS/s or two at 30.72 MS/s)
+create_clock -name cat_dclk -period 16.276 [get_ports CAT_DCLK_P]
+
+# Clock crossings between DATA_CLK and bus_clk go through gray-coded pointers
+# and 2-flop synchronizers (u220_cdc_fifo, u220_radio); bound their skew.
+set_max_delay -datapath_only -from [get_clocks cat_dclk] -to [get_clocks -of_objects [get_nets bus_clk]] 8.000
+set_max_delay -datapath_only -from [get_clocks -of_objects [get_nets bus_clk]] -to [get_clocks cat_dclk] 8.000

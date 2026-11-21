@@ -10,7 +10,7 @@
 //   0x0005 ro  UPTIME_HI
 //   0x0006 ro  BUS_CLK_HZ
 //
-//   0x0010 rw  STREAM_MODE   0 drain, 1 loopback, 2 generator (see u220_stream.v)
+//   0x0010 rw  STREAM_MODE   0 drain, 1 loopback, 2 generator, 3 radio (see u220_stream.v)
 //   0x0011 rw  GEN_LEN       generator payload words per packet (default 1021 = 8176-byte packets)
 //   0x0012 ro  TX_PKTS       host->FPGA data packets
 //   0x0013 ro  TX_WORDS      host->FPGA 64-bit words
@@ -33,13 +33,27 @@
 //   Accesses to 0x0030 and 0x0031 wait in hardware until the previous transfer
 //   is done, so a control packet can carry several SPI writes and reads back to back.
 //
+//   0x0040 rw  RADIO_CTRL    [0] enable packets, [1] two channels (RX1+RX2),
+//                            [2] test counter instead of samples, [3] reset the
+//                            sample path (default 1; hold it while the AD9361 is
+//                            reset or its clocks change, and while changing [1]
+//                            or [2]). See u220_radio.v.
+//   0x0041 rw  RADIO_SPP     sample words (2 samples each) per packet, 1..2000, default 1020
+//   0x0042 ro  RADIO_STATUS  [3:0] RX_FRAME (rise, fall) values seen, [4] crossing overflow,
+//                            [5] sample path running, [6] packet FIFO overrun, [7] idle
+//   0x0043 ro  RADIO_CLK_HZ  measured AD9361 DATA_CLK frequency (10 Hz resolution)
+//   0x0044 ro  RADIO_PKTS    sample packets made
+//   0x0045 ro  RADIO_DROPS   sample packets dropped because the host was too slow
+//
 // Unmapped addresses read 0xDEADBEEF.
 
 `default_nettype none
 module u220_core #(
     parameter [15:0] VERSION_MAJOR = 16'd1,
-    parameter [15:0] VERSION_MINOR = 16'd1,
-    parameter [31:0] BUS_CLK_HZ    = 32'd100_000_000
+    parameter [15:0] VERSION_MINOR = 16'd2,
+    parameter [31:0] BUS_CLK_HZ    = 32'd100_000_000,
+    parameter        RADIO_FIFO    = 13,                // log2 words of sample packet FIFO
+    parameter [31:0] METER_CYCLES  = BUS_CLK_HZ / 10
 )(
     input  wire        clk,
     input  wire        rst,
@@ -59,6 +73,13 @@ module u220_core #(
     output wire        spi_sen_n,
     output wire        spi_mosi,
     input  wire        spi_miso,
+
+    // AD9361 RX capture (u220_rx_io)
+    input  wire        radio_clk,
+    input  wire [11:0] cap_i,
+    input  wire [11:0] cap_q,
+    input  wire        cap_fr_r,
+    input  wire        cap_fr_f,
 
     output wire        led_heartbeat,
     output wire        led_activity
@@ -90,6 +111,10 @@ module u220_core #(
     wire [23:0] spi_rdata;
     assign reg_wait = spi_busy & (reg_addr == 16'h0030 || reg_addr == 16'h0031);
     wire [31:0] tx_pkts, tx_words, rx_pkts, rx_words;
+    reg  [3:0]  radio_ctrl;
+    reg  [10:0] radio_spp;
+    wire [7:0]  radio_status;
+    wire [31:0] radio_clk_hz, radio_pkts, radio_drops;
 
     always @(posedge clk) begin
         cat_ctrl_out_s1 <= cat_ctrl_out;
@@ -111,6 +136,8 @@ module u220_core #(
             fe_ctrl         <= 6'd0;
             vctcxo_dac      <= 16'hBFFF;
             spi_half        <= 16'd10;
+            radio_ctrl      <= 4'b1000;
+            radio_spp       <= 11'd1020;
         end else begin
             stream_clear <= 1'b0;
             if (reg_rd && reg_addr == 16'h0004)
@@ -125,6 +152,8 @@ module u220_core #(
                     16'h0022: fe_ctrl      <= reg_wdata[5:0];
                     16'h0023: vctcxo_dac   <= reg_wdata[15:0];
                     16'h0032: spi_half     <= reg_wdata[15:0];
+                    16'h0040: radio_ctrl   <= reg_wdata[3:0];
+                    16'h0041: radio_spp    <= reg_wdata[10:0];
                     default: ;
                 endcase
         end
@@ -153,6 +182,12 @@ module u220_core #(
             16'h0030: reg_rdata = {spi_busy, 7'd0, spi_rdata};
             16'h0031: reg_rdata = {8'd0, spi_rdata};
             16'h0032: reg_rdata = {16'd0, spi_half};
+            16'h0040: reg_rdata = {28'd0, radio_ctrl};
+            16'h0041: reg_rdata = {21'd0, radio_spp};
+            16'h0042: reg_rdata = {24'd0, radio_status};
+            16'h0043: reg_rdata = radio_clk_hz;
+            16'h0044: reg_rdata = radio_pkts;
+            16'h0045: reg_rdata = radio_drops;
             default:  reg_rdata = 32'hDEADBEEF;
         endcase
     end
@@ -164,12 +199,26 @@ module u220_core #(
         .busy(spi_busy), .rdata(spi_rdata),
         .sclk(spi_sclk), .sen_n(spi_sen_n), .mosi(spi_mosi), .miso(spi_miso));
 
+    // ------------------------------------------------------------- RX samples
+    wire [63:0] radio_tdata;
+    wire        radio_tlast, radio_tvalid, radio_tready;
+
+    u220_radio #(.PKT_FIFO_SIZE(RADIO_FIFO), .METER_CYCLES(METER_CYCLES),
+                 .METER_SCALE(BUS_CLK_HZ / METER_CYCLES)) radio (
+        .radio_clk(radio_clk), .cap_i(cap_i), .cap_q(cap_q), .cap_fr_r(cap_fr_r), .cap_fr_f(cap_fr_f),
+        .clk(clk), .rst(rst),
+        .enable(radio_ctrl[0]), .mimo(radio_ctrl[1]), .test(radio_ctrl[2]), .reset(radio_ctrl[3]),
+        .spp(radio_spp),
+        .o_tdata(radio_tdata), .o_tlast(radio_tlast), .o_tvalid(radio_tvalid), .o_tready(radio_tready),
+        .status(radio_status), .dclk_hz(radio_clk_hz), .pkts(radio_pkts), .drops(radio_drops));
+
     // ----------------------------------------------------------------- streams
     u220_stream stream (
         .clk(clk), .rst(rst), .clear(stream_clear),
         .mode(stream_mode), .gen_len(gen_len),
         .tx_tdata(tx_tdata), .tx_tlast(tx_tlast), .tx_tvalid(tx_tvalid), .tx_tready(tx_tready),
         .rx_tdata(rx_tdata), .rx_tlast(rx_tlast), .rx_tvalid(rx_tvalid), .rx_tready(rx_tready),
+        .radio_tdata(radio_tdata), .radio_tlast(radio_tlast), .radio_tvalid(radio_tvalid), .radio_tready(radio_tready),
         .tx_pkts(tx_pkts), .tx_words(tx_words), .rx_pkts(rx_pkts), .rx_words(rx_words));
 
     // -------------------------------------------------------------------- LEDs
