@@ -38,7 +38,23 @@ module tb_u220_core;
         end
     end
 
-    u220_core #(.RADIO_FIFO(8), .METER_CYCLES(10000)) dut (
+    // fake GPS module / references: UART at 20 clk per bit, PPS every 20000 clk
+    // (a slightly odd high time), a 10 MHz clock on CLKIN_10MHz, PPS_IN_EXT idle low
+    logic gps_rx = 1, pps_int = 0, clk10 = 0, gps_nrst;
+    always #50 clk10 = ~clk10;
+    initial forever begin
+        repeat (19993) @(posedge clk);
+        pps_int <= 1;
+        repeat (7) @(posedge clk);
+        pps_int <= 0;
+    end
+    task automatic gps_send(input logic [7:0] b);
+        gps_rx <= 0; repeat (20) @(posedge clk);
+        for (int i = 0; i < 8; i++) begin gps_rx <= b[i]; repeat (20) @(posedge clk); end
+        gps_rx <= 1; repeat (20) @(posedge clk);
+    endtask
+
+    u220_core #(.RADIO_FIFO(8), .METER_CYCLES(10000), .GPS_GATE(50000)) dut (
         .clk(clk), .rst(rst), .build_id(32'hB01DB01D),
         .ctrl_tdata, .ctrl_tlast, .ctrl_tvalid, .ctrl_tready,
         .resp_tdata, .resp_tlast, .resp_tvalid, .resp_tready,
@@ -47,6 +63,7 @@ module tb_u220_core;
         .cat_ctrl, .cat_ctrl_out(8'hA5), .fe_ctrl, .vctcxo_dac,
         .spi_sclk, .spi_sen_n, .spi_mosi, .spi_miso,
         .radio_clk, .cap_i, .cap_q, .cap_fr_r, .cap_fr_f,
+        .gps_rx, .pps_int, .pps_ext(1'b0), .clk10, .gps_nrst,
         .led_heartbeat(), .led_activity());
 
     // AD9361 SPI model: 24-bit words, [23] write, [17:8] address, [7:0] data.
@@ -233,7 +250,7 @@ module tb_u220_core;
                   op(0, 16'h0020, 0), op(0, 16'h0021, 0), op(0, 16'h0023, 0),
                   op(0, 16'h0099, 0)}, 16'd1, r);
         check("ID",            lo(r[1]), 32'h55323230);
-        check("VERSION",       lo(r[2]), 32'h00010002);
+        check("VERSION",       lo(r[2]), 32'h00010003);
         check("BUILD",         lo(r[3]), 32'hB01DB01D);
         check("SCRATCH old",   lo(r[4]), 32'h0);
         check("SCRATCH new",   lo(r[5]), 32'h12345678);
@@ -384,6 +401,38 @@ module tb_u220_core;
             end
             wr(16'h0040, 32'h8);
             rx_drain(10, nd);
+        end
+
+        // ---- GPS UART, PPS and reference meters
+        begin
+            logic [31:0] v;
+            string msg = "$GPRMC,1*";
+            check("GPS nRST", gps_nrst, 1);
+            wr(16'h0051, 32'd20);                 // 20 clk per bit
+            wr(16'h0055, 32'd0);                  // restart the shortest-pulse meter
+            for (int i = 0; i < msg.len(); i++) gps_send(msg[i]);
+            gps_rx <= 0; repeat (200) @(posedge clk); gps_rx <= 1;  // framing error: stop bit low
+            repeat (300) @(posedge clk);
+            rd(16'h0052, v); check("GPS bytes", v, msg.len());
+            rd(16'h0056, v); check("GPS framing errors", v, 1);
+            rd(16'h0055, v); check("GPS min pulse", v, 20);
+            for (int a = 0; a < 8; a += 4) begin
+                wr(16'h0053, a);
+                rd(16'h0054, v);
+                check($sformatf("GPS data %0d", a), v, {msg[a + 3], msg[a + 2], msg[a + 1], msg[a]});
+            end
+            // wait for two full gates (500 us each here)
+            while ($time < 1050us) @(posedge clk);
+            rd(16'h0058, v); check("PPS_INT edges/gate", v >= 2 && v <= 3, 1);
+            rd(16'h0059, v); check("PPS_EXT edges/gate", v, 0);
+            rd(16'h005A, v); check("CLK10 edges/gate", v >= 4999 && v <= 5001, 1);
+            rd(16'h005C, v); check("PPS_INT period", v, 20000);
+            rd(16'h0060, v); check("PPS_INT total", v >= 4 && v <= 6, 1);
+            rd(16'h0062, v); check("CLK10 total", v >= 10000, 1);
+            rd(16'h0063, v); check("GPS_RX total", v > 10 && v < 100, 1);
+            wr(16'h0050, 32'd0);
+            repeat (2) @(posedge clk);
+            check("GPS nRST off", gps_nrst, 0);
         end
 
         if (errors == 0) $display("PASS: all checks");

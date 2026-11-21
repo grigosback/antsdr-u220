@@ -45,15 +45,33 @@
 //   0x0044 ro  RADIO_PKTS    sample packets made
 //   0x0045 ro  RADIO_DROPS   sample packets dropped because the host was too slow
 //
+//   0x0050 rw  GPS_CTRL      [0] GPS module nRST (default 1: running)
+//   0x0051 rw  GPS_UART_DIV  bus_clk cycles per bit of the GPS UART (default 9600 baud)
+//   0x0052 ro  GPS_UART_COUNT bytes received from the GPS module in total
+//   0x0053 rw  GPS_UART_ADDR ring buffer address (0..511) for GPS_UART_DATA
+//   0x0054 ro  GPS_UART_DATA bytes ADDR..ADDR+3 of the 512-byte ring buffer, ADDR in [7:0]
+//   0x0055 rw  GPS_RX_MINW   shortest pulse seen on the GPS UART line in bus_clk cycles
+//                            (= one bit time); write: start over
+//   0x0056 ro  GPS_UART_FERR framing errors
+//   0x0057 ro  REF_LEVELS    current levels {CLKIN_10MHz, GPS_UART_RX, PPS_IN_EXT, PPS_IN_INT}
+//   0x0058 ro  EDGES_PPS_INT rising edges in the last second: PPS_IN_INT (GPS module PPS),
+//   0x0059 ro  EDGES_PPS_EXT   PPS_IN_EXT (REF connector), CLKIN_10MHz, GPS_UART_RX
+//   0x005A ro  EDGES_CLK10
+//   0x005B ro  EDGES_GPS_RX
+//   0x005C ro  PPS_INT_PERIOD bus_clk cycles between the last two PPS_IN_INT rising edges
+//   0x005D ro  PPS_EXT_PERIOD same for PPS_IN_EXT
+//   0x0060..0x0063 ro rising edges in total, same order as 0x0058..0x005B
+//
 // Unmapped addresses read 0xDEADBEEF.
 
 `default_nettype none
 module u220_core #(
     parameter [15:0] VERSION_MAJOR = 16'd1,
-    parameter [15:0] VERSION_MINOR = 16'd2,
+    parameter [15:0] VERSION_MINOR = 16'd3,
     parameter [31:0] BUS_CLK_HZ    = 32'd100_000_000,
     parameter        RADIO_FIFO    = 13,                // log2 words of sample packet FIFO
-    parameter [31:0] METER_CYCLES  = BUS_CLK_HZ / 10
+    parameter [31:0] METER_CYCLES  = BUS_CLK_HZ / 10,
+    parameter [31:0] GPS_GATE      = BUS_CLK_HZ          // edge meter gate period
 )(
     input  wire        clk,
     input  wire        rst,
@@ -80,6 +98,13 @@ module u220_core #(
     input  wire [11:0] cap_q,
     input  wire        cap_fr_r,
     input  wire        cap_fr_f,
+
+    // GPS module and reference inputs (asynchronous)
+    input  wire        gps_rx,
+    input  wire        pps_int,
+    input  wire        pps_ext,
+    input  wire        clk10,
+    output wire        gps_nrst,
 
     output wire        led_heartbeat,
     output wire        led_activity
@@ -115,6 +140,13 @@ module u220_core #(
     reg  [10:0] radio_spp;
     wire [7:0]  radio_status;
     wire [31:0] radio_clk_hz, radio_pkts, radio_drops;
+    reg         gps_ctrl;
+    reg  [15:0] gps_div;
+    reg  [8:0]  gps_addr;
+    wire [31:0] gps_data, gps_count, gps_ferr, gps_minw, pps_int_period, pps_ext_period;
+    wire [3:0]  ref_levels;
+    wire [127:0] edge_rate, edge_total;
+    assign gps_nrst = gps_ctrl;
 
     always @(posedge clk) begin
         cat_ctrl_out_s1 <= cat_ctrl_out;
@@ -138,6 +170,9 @@ module u220_core #(
             spi_half        <= 16'd10;
             radio_ctrl      <= 4'b1000;
             radio_spp       <= 11'd1020;
+            gps_ctrl        <= 1'b1;
+            gps_div         <= BUS_CLK_HZ / 9600;
+            gps_addr        <= 9'd0;
         end else begin
             stream_clear <= 1'b0;
             if (reg_rd && reg_addr == 16'h0004)
@@ -154,6 +189,9 @@ module u220_core #(
                     16'h0032: spi_half     <= reg_wdata[15:0];
                     16'h0040: radio_ctrl   <= reg_wdata[3:0];
                     16'h0041: radio_spp    <= reg_wdata[10:0];
+                    16'h0050: gps_ctrl     <= reg_wdata[0];
+                    16'h0051: gps_div      <= reg_wdata[15:0];
+                    16'h0053: gps_addr     <= reg_wdata[8:0];
                     default: ;
                 endcase
         end
@@ -188,6 +226,24 @@ module u220_core #(
             16'h0043: reg_rdata = radio_clk_hz;
             16'h0044: reg_rdata = radio_pkts;
             16'h0045: reg_rdata = radio_drops;
+            16'h0050: reg_rdata = {31'd0, gps_ctrl};
+            16'h0051: reg_rdata = {16'd0, gps_div};
+            16'h0052: reg_rdata = gps_count;
+            16'h0053: reg_rdata = {23'd0, gps_addr};
+            16'h0054: reg_rdata = gps_data;
+            16'h0055: reg_rdata = gps_minw;
+            16'h0056: reg_rdata = gps_ferr;
+            16'h0057: reg_rdata = {28'd0, ref_levels};
+            16'h0058: reg_rdata = edge_rate[31:0];
+            16'h0059: reg_rdata = edge_rate[63:32];
+            16'h005A: reg_rdata = edge_rate[127:96];
+            16'h005B: reg_rdata = edge_rate[95:64];
+            16'h005C: reg_rdata = pps_int_period;
+            16'h005D: reg_rdata = pps_ext_period;
+            16'h0060: reg_rdata = edge_total[31:0];
+            16'h0061: reg_rdata = edge_total[63:32];
+            16'h0062: reg_rdata = edge_total[127:96];
+            16'h0063: reg_rdata = edge_total[95:64];
             default:  reg_rdata = 32'hDEADBEEF;
         endcase
     end
@@ -211,6 +267,15 @@ module u220_core #(
         .spp(radio_spp),
         .o_tdata(radio_tdata), .o_tlast(radio_tlast), .o_tvalid(radio_tvalid), .o_tready(radio_tready),
         .status(radio_status), .dclk_hz(radio_clk_hz), .pkts(radio_pkts), .drops(radio_drops));
+
+    // ------------------------------------------------- GPS module, references
+    u220_gps #(.GATE_CYCLES(GPS_GATE)) gps (
+        .clk(clk), .rst(rst),
+        .gps_rx(gps_rx), .pps_int(pps_int), .pps_ext(pps_ext), .clk10(clk10),
+        .uart_div(gps_div), .raddr(gps_addr), .rdata(gps_data), .wcount(gps_count), .ferr(gps_ferr),
+        .minw_clear(reg_wr && reg_addr == 16'h0055), .minw(gps_minw),
+        .levels(ref_levels), .rate(edge_rate), .total(edge_total),
+        .period_int(pps_int_period), .period_ext(pps_ext_period));
 
     // ----------------------------------------------------------------- streams
     u220_stream stream (

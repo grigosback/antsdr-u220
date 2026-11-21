@@ -175,3 +175,17 @@ create_clock -name cat_dclk -period 16.276 [get_ports CAT_DCLK_P]
 # and 2-flop synchronizers (u220_cdc_fifo, u220_radio); bound their skew.
 set_max_delay -datapath_only -from [get_clocks cat_dclk] -to [get_clocks -of_objects [get_nets bus_clk]] 8.000
 set_max_delay -datapath_only -from [get_clocks -of_objects [get_nets bus_clk]] -to [get_clocks cat_dclk] 8.000
+
+# Weak pulls so unconnected reference/GPS inputs read a steady level instead of noise
+# (UART idles high). Harmless when something drives them.
+set_property PULLTYPE PULLDOWN [get_ports {PPS_IN_INT PPS_IN_EXT CLKIN_10MHz}]
+set_property PULLTYPE PULLUP   [get_ports GPS_UART_RX]
+# asynchronous inputs, sampled through two flip-flops in u220_gps
+set_false_path -from [get_ports {PPS_IN_INT PPS_IN_EXT CLKIN_10MHz GPS_UART_RX}]
+
+# FX3 GPIF bus: keep the first/last flip-flop of every data and flag line in the
+# I/O block, so the bus timing does not depend on placement. Without this a
+# build sampled GPIF_D[9] late and corrupted host->FPGA words.
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *slave_fifo32/gpif_data_in_reg[*]}]
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *slave_fifo32/gpif_data_out_reg[*]}]
+set_property IOB TRUE [get_cells -hier -filter {NAME =~ *slave_fifo32/fx3_ready_reg || NAME =~ *slave_fifo32/fx3_wmark_reg}]

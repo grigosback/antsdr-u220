@@ -139,6 +139,8 @@ module u220_top (
         .cat_ctrl(cat_ctrl), .cat_ctrl_out(CAT_CTL_OUT), .fe_ctrl(fe_ctrl), .vctcxo_dac(vctcxo_dac),
         .spi_sclk(CAT_SPI_CLK), .spi_sen_n(CAT_SPI_EN), .spi_mosi(CAT_SPI_DI), .spi_miso(CAT_SPI_DO),
         .radio_clk(radio_clk), .cap_i(cap_i), .cap_q(cap_q), .cap_fr_r(cap_fr_r), .cap_fr_f(cap_fr_f),
+        .gps_rx(GPS_UART_RX), .pps_int(PPS_IN_INT), .pps_ext(PPS_IN_EXT), .clk10(CLKIN_10MHz),
+        .gps_nrst(GPS_nRST),
         .led_heartbeat(led_heartbeat), .led_activity(led_activity));
 
     // ------------------------------------------------------------------- FX3
@@ -190,7 +192,6 @@ module u220_top (
     // ------------------------------------------------------------------ misc
     assign PPS_LED     = led_heartbeat;
     assign REF_LOCKED  = led_activity;
-    assign GPS_nRST    = 1'b1;
     assign GPS_UART_TX = 1'b1;
     assign FPGA_TXD0   = 1'b1;
 endmodule

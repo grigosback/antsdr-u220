@@ -33,6 +33,12 @@ constexpr uint16_t VCTCXO_DAC = 0x0023;
 constexpr uint16_t SPI_XFER = 0x0030, SPI_RDATA = 0x0031, SPI_HALF = 0x0032;
 constexpr uint16_t RADIO_CTRL = 0x0040, RADIO_SPP = 0x0041, RADIO_STATUS = 0x0042;
 constexpr uint16_t RADIO_CLK_HZ = 0x0043, RADIO_PKTS = 0x0044, RADIO_DROPS = 0x0045;
+constexpr uint16_t GPS_CTRL = 0x0050, GPS_UART_DIV = 0x0051, GPS_UART_COUNT = 0x0052;
+constexpr uint16_t GPS_UART_ADDR = 0x0053, GPS_UART_DATA = 0x0054, GPS_RX_MINW = 0x0055;
+constexpr uint16_t GPS_UART_FERR = 0x0056, REF_LEVELS = 0x0057;
+// rising edges in the last second / in total, in the order PPS_IN_INT, PPS_IN_EXT, CLKIN_10MHz, GPS_UART_RX
+constexpr uint16_t EDGES = 0x0058, EDGES_TOTAL = 0x0060;
+constexpr uint16_t PPS_INT_PERIOD = 0x005C, PPS_EXT_PERIOD = 0x005D;
 } // namespace reg
 
 // STREAM_MODE values

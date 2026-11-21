@@ -35,3 +35,7 @@ target_compile_options(u220_ad9361 PRIVATE -Wall -Wextra)
 add_executable(u220_rx tools/u220_rx.cpp)
 target_link_libraries(u220_rx PRIVATE u220)
 target_compile_options(u220_rx PRIVATE -Wall -Wextra)
+
+add_executable(u220_gps tools/u220_gps.cpp)
+target_link_libraries(u220_gps PRIVATE u220)
+target_compile_options(u220_gps PRIVATE -Wall -Wextra)

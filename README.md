@@ -16,7 +16,9 @@ really on this board.
 | FPGA | Xilinx Artix-7 **XC7A200T** | Package assumed FBG484, speed grade unknown, so builds target -1 |
 | USB | Cypress FX3 (CYUSB3014) | Bridges USB 3 to the FPGA over a 32-bit GPIF II slave FIFO |
 | RF | AD9361 | Its SPI, control and data lines all go to the FPGA |
-| Clock | 40 MHz always-on oscillator, LTC2630 DAC for trimming, PPS/10 MHz/GPS inputs | The vendor pin names say AD5662 |
+| Clock | 40 MHz always-on oscillator, LTC2630 DAC for trimming | The vendor pin names say AD5662 |
+| GPS / reference | On-board GPS module (GPS + GLONASS NMEA at 9600 baud, PPS to the FPGA), REF input for PPS or 10 MHz | See "GPS module and reference inputs" |
+| RF ports | RX1, TX/RX1, RX2, TX/RX2 | Two receivers: each channel switches between its RX port and its TX/RX port |
 | Debug | 6-pin 2.54 mm JTAG header | |
 
 **Two U220 versions exist.** MicroPhase's vendor repo targets `xc7a100tfgg484-2`,
@@ -108,6 +110,16 @@ register's previous value.
 | 0x0042 | ro | RADIO_STATUS | RX_FRAME patterns seen, overflow flags, running, idle |
 | 0x0043 | ro | RADIO_CLK_HZ | measured AD9361 DATA_CLK, 10 Hz resolution |
 | 0x0044/5 | ro | RADIO_PKTS, RADIO_DROPS | sample packets sent / dropped |
+| 0x0050 | rw | GPS_CTRL | [0] GPS module nRST (default 1: running) |
+| 0x0051 | rw | GPS_UART_DIV | bus_clk cycles per bit, default 9600 baud |
+| 0x0052 | ro | GPS_UART_COUNT | bytes received from the GPS module |
+| 0x0053/4 | rw/ro | GPS_UART_ADDR, GPS_UART_DATA | 512-byte ring buffer, read 4 bytes at ADDR |
+| 0x0055 | rw | GPS_RX_MINW | shortest pulse on the GPS UART line (one bit time); write: restart |
+| 0x0056 | ro | GPS_UART_FERR | framing errors |
+| 0x0057 | ro | REF_LEVELS | {CLKIN_10MHz, GPS_UART_RX, PPS_IN_EXT, PPS_IN_INT} |
+| 0x0058..B | ro | EDGES_* | rising edges in the last second: PPS_IN_INT, PPS_IN_EXT, CLKIN_10MHz, GPS_UART_RX |
+| 0x005C/D | ro | PPS_INT/EXT_PERIOD | bus_clk cycles between the last two PPS edges (measures the 40 MHz oscillator) |
+| 0x0060..3 | ro | EDGES_TOTAL_* | rising edges in total, same order |
 
 Accesses to 0x0030/0x0031 wait in hardware until the previous SPI transfer is
 done, so one control packet can carry up to 14 SPI ops with no polling.
@@ -228,6 +240,26 @@ Measured on the board (C++, libusb, 32 async transfers):
 | AD9361 tone, 2 channels, mask on RX2 | RX2 reads exact zeros, RX1 unaffected: channels are not swapped |
 | FM band, 98 MHz LO, 20 MS/s | stations visible; retuning the LO by 1 MHz leaves them at the same RF frequencies, so I/Q are not swapped |
 
+### GPS module and reference inputs, see `fpga/u220/u220_gps.v`
+
+From the vendor design: the REF connector goes to `PPS_IN_EXT` (a 3.3 V FPGA
+input) and takes a PPS or a 10 MHz square wave; the vendor's `ppsloop.v` tells
+which and disciplines the 40 MHz oscillator through the trim DAC. There is no
+separate reference PLL chip. The GPS connector feeds an on-board GPS module whose
+serial output and PPS go to the FPGA. `CLKIN_10MHz` is a 1.8 V input the vendor
+design does not use (purpose unknown).
+
+The own design (1.3) only watches these inputs for now:
+
+```sh
+host/cpp/build/u220_gps --secs 5
+```
+
+prints the level and edge rate of every input, the oscillator offset against
+each PPS, the GPS baud rate (from the shortest pulse) and the module's NMEA output.
+Measured without a GPS antenna: the module sends GPS + GLONASS NMEA at 9600 baud
+with no fix, so no PPS yet; REF and CLKIN_10MHz are quiet.
+
 ### USB throughput (USB 3, Python + pyusb, 4 threads)
 
 | Test | Result |
@@ -273,14 +305,14 @@ and with UHD's B2xx images (`uhd_images_downloader`).
 
 ```
 fpga/build.tcl     build either target out of tree into fpga/build/
-fpga/u220/         own design (top, core, ctrl, stream, spi, rx_io, radio, cdc_fifo, constraints, sim/)
+fpga/u220/         own design (top, core, ctrl, stream, spi, rx_io, radio, cdc_fifo, gps, constraints, sim/)
 fpga/b210compat/   vendor B210-compatible design (top, b200_core, ppsloop, constraints)
 fpga/lib/          the subset of the Ettus/MicroPhase FPGA library both targets use
 fpga/ip/           Vivado IP (.xci only, regenerated into build/); <target>/ip.txt picks them
 host/              loader, own-design tool, B210-compat register tool, bitstream chip-ID checker,
                    iq_spectrum.py (spectrum of a cs16 capture)
-host/cpp/          C++ library (libusb) + UHD's AD9361 driver; tools u220_ad9361 (bring-up)
-                   and u220_rx (sample streaming)
+host/cpp/          C++ library (libusb) + UHD's AD9361 driver; tools u220_ad9361 (bring-up),
+                   u220_rx (sample streaming) and u220_gps (GPS module, PPS/REF inputs)
 ```
 
 ## Changes from the vendor project
@@ -291,6 +323,10 @@ host/cpp/          C++ library (libusb) + UHD's AD9361 driver; tools u220_ad9361
   paths and an out-of-tree `build/` directory.
 - `b210compat`: `COMPAT_MINOR` is set to 1, so this repo's image reads back as
   16.1 and the stock image as 16.0.
+- `u220`: the GPIF data and flag flip-flops are forced into the I/O blocks
+  (`IOB TRUE` in `u220.xdc`). The vendor constraints leave them free, and one
+  build placed the `GPIF_D[9]` input flip-flop far enough away to corrupt about
+  4% of host-to-FPGA words. Run `host/u220.py loopback` after every build.
 
 ## Known warnings
 
