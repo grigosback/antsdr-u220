@@ -18,7 +18,7 @@ really on this board.
 | RF | AD9361 | Its SPI, control and data lines all go to the FPGA |
 | Clock | 40 MHz always-on oscillator, LTC2630 DAC for trimming | The vendor pin names say AD5662 |
 | GPS / reference | On-board GPS module (GPS + GLONASS NMEA at 9600 baud, PPS to the FPGA), REF input for PPS or 10 MHz | See "GPS module and reference inputs" |
-| RF ports | RX1, TX/RX1, RX2, TX/RX2 | Two receivers: each channel switches between its RX port and its TX/RX port |
+| RF ports | RX1, TX/RX1, RX2, TX/RX2 | Two receivers: each channel switches between its RX port and its TX/RX port. See "RF switches" |
 | Debug | 6-pin 2.54 mm JTAG header | |
 
 **Two U220 versions exist.** MicroPhase's vendor repo targets `xc7a100tfgg484-2`,
@@ -239,6 +239,31 @@ Measured on the board (C++, libusb, 32 async transfers):
 | AD9361 tone, 61.44 MS/s (DATA_CLK 61.44 MHz) | tone exactly at rate/32, image −178 dB, floor −194 dBFS: no capture bit errors |
 | AD9361 tone, 2 channels, mask on RX2 | RX2 reads exact zeros, RX1 unaffected: channels are not swapped |
 | FM band, 98 MHz LO, 20 MS/s | stations visible; retuning the LO by 1 MHz leaves them at the same RF frequencies, so I/Q are not swapped |
+
+### RF switches (FE_CTRL)
+
+The vendor pin names and their comments disagree, so the switches were mapped
+on the board. Setup: antennas on TX/RX1 and TX/RX2, nothing on RX1/RX2; FM band,
+98 MHz LO, gain 40, levels of six FM stations compared.
+
+| FE_CTRL | RX1 | RX2 |
+|---|---|---|
+| 0x00 (default) | antenna on TX/RX1 (90.5 MHz at −45 dBFS) | antenna on TX/RX2 (−44 dBFS) |
+| bit 2 set | stations gone (−32 dB, noise floor): TX/RX1 disconnected | unchanged |
+| bit 3, 4 or 5 set (any combination) | unchanged | unchanged |
+
+So bit 2 (port `FE_RX1_SEL1`, pin R18; the vendor comment calls the net
+`FE_TXRX1_SEL1`) is channel 1's TX/RX switch. Nothing found so far switches
+channel 2, which always hears TX/RX2. Its switches may be on the four pins the
+vendor constraints leave commented out (T18, N14, R14, R16, "SEL2"); those are
+not driven yet. Still unknown: what bits 3-5 do, and the RX-port routing (needs
+an antenna on RX1/RX2).
+
+`u220_rx --poke REG=VAL` writes AD9361 registers after the setup (RX
+experiments only; ENSM, TX attenuation and TX synth registers are refused).
+Register 0x004 picks the AD9361 RX input: with port A (0x03) both channels
+drop to the noise floor at 98 MHz, ports B (0x0C) and C (0x30, the driver's choice
+below 1.2 GHz) both work there.
 
 ### GPS module and reference inputs, see `fpga/u220/u220_gps.v`
 

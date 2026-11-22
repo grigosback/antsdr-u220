@@ -13,6 +13,8 @@
 //   --bist-mask M  leave the tone out of: [0] RX1 Q, [1] RX1 I, [2] RX2 Q, [3] RX2 I
 //   --skip-init keep the current AD9361 setup (only for --test runs)
 //   --discard   check and count samples without keeping them (long runs)
+//   --poke R=V  write AD9361 register R = V (both hex) after the setup
+//               (RX experiments only: ENSM, TX attenuation and TX synth registers are refused)
 
 #include "ad9361_device.h"
 #include "radio.hpp"
@@ -23,6 +25,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 using uhd::usrp::ad9361_device_t;
 
@@ -44,6 +48,7 @@ int main(int argc, char** argv)
     bool test = false, skip_init = false, discard = false;
     int bist = -1, bist_mask = 0;
     unsigned spp = 1020;
+    std::vector<std::pair<unsigned, unsigned>> pokes;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -65,13 +70,28 @@ int main(int argc, char** argv)
         else if (a == "--discard") discard = true;
         else if (a == "--spp") spp = unsigned(val());
         else if (a == "--bist-mask") bist_mask = int(val());
+        else if (a == "--poke" && i + 1 < argc) {
+            unsigned r = 0, v = 0;
+            if (std::sscanf(argv[++i], "%x=%x", &r, &v) != 2 || r > 0x3FF || v > 0xFF) {
+                std::fprintf(stderr, "--poke needs REG=VALUE in hex\n");
+                return 2;
+            }
+            // keep this RX-only: no ENSM/TX enable, TX attenuation or TX synth changes
+            if (r == 0x002 || r == 0x013 || r == 0x014 || r == 0x015 || (r >= 0x073 && r <= 0x07C) ||
+                (r >= 0x270 && r <= 0x29F)) {
+                std::fprintf(stderr, "--poke: register 0x%03x touches TX or the ENSM, refused\n", r);
+                return 2;
+            }
+            pokes.emplace_back(r, v);
+        }
         else if (a == "--bist") {
             bist = 0;
             if (i + 1 < argc && argv[i + 1][0] != '-') bist = std::atoi(argv[++i]);
         } else {
             std::fprintf(stderr,
                 "usage: %s [--rate HZ] [--freq HZ] [--gain DB] [--bw HZ] [--rx1|--rx2|--rx12]\n"
-                "          [--num N] [--out FILE] [--test] [--bist [INDEX]] [--bist-mask M] [--spp WORDS] [--skip-init] [--discard]\n",
+                "          [--num N] [--out FILE] [--test] [--bist [INDEX]] [--bist-mask M] [--spp WORDS] [--skip-init] [--discard]\n"
+                "          [--poke REG=VAL ...]\n",
                 argv[0]);
             return 2;
         }
@@ -98,6 +118,10 @@ int main(int argc, char** argv)
             throw u220::error("--skip-init only works with --test");
         }
         if (bist >= 0) radio.bist_tone(true, bist, 1, bist_mask);
+        for (auto [r, v] : pokes) {
+            dev->ad9361_poke(uint16_t(r), uint8_t(v));
+            std::printf("AD9361 0x%03x = 0x%02x (read back 0x%02x)\n", r, v, dev->ad9361_peek(uint16_t(r)));
+        }
 
         dev->wr(u220::reg::RADIO_SPP, spp);
         radio.sample_path(test);
